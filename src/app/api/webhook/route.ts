@@ -1,5 +1,9 @@
 import { validateSignature, messagingApi, webhook } from "@line/bot-sdk";
 
+// Next.js のビルド時静的最適化を無効化し、常にリクエスト時に動的処理する
+// これがないと cacheComponents 有効環境で POST が 405 になる
+export const dynamic = "force-dynamic";
+
 const { MessagingApiClient } = messagingApi;
 
 // 環境変数の存在チェック（起動時ではなくリクエスト時に検証）
