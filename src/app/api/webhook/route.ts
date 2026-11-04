@@ -1,6 +1,7 @@
 import { after } from "next/server";
 import { validateSignature, messagingApi, webhook } from "@line/bot-sdk";
 import { getActiveFaqs, type Faq } from "@/lib/supabase/server";
+import { getAiAnswer } from "@/lib/claude/client";
 
 // Next.js のビルド時静的最適化を無効化し、常にリクエスト時に動的処理する
 // これがないと cacheComponents 有効環境で POST が 405 になる
@@ -61,8 +62,6 @@ export async function POST(request: Request): Promise<Response> {
   return new Response("OK", { status: 200 });
 }
 
-const FALLBACK_MESSAGE = "確認して担当者からご連絡します。";
-
 async function handleEvents(
   rawBody: string,
   channelAccessToken: string
@@ -117,13 +116,18 @@ async function handleEvent(
     return;
   }
 
-  // 受信テキストと FAQ の question を完全一致で検索する
+  // FAQ と完全一致する場合は登録済み回答を返す。
+  // 一致しない場合のみ Claude API を呼び出してFAQを根拠に回答させる。
   const matched = faqs.find((faq) => faq.question === textMessage.text);
-  const replyText = matched ? matched.answer : FALLBACK_MESSAGE;
 
-  console.log(
-    `[Webhook] メッセージ受信 → FAQ ${matched ? "マッチ" : "フォールバック"}`
-  );
+  let replyText: string;
+  if (matched) {
+    console.log("[Webhook] メッセージ受信 → FAQ完全一致");
+    replyText = matched.answer;
+  } else {
+    console.log("[Webhook] メッセージ受信 → Claude AI 呼び出し");
+    replyText = await getAiAnswer(textMessage.text, faqs);
+  }
 
   try {
     await client.replyMessage({
