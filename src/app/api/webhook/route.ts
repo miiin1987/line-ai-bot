@@ -1,3 +1,4 @@
+import { after } from "next/server";
 import { validateSignature, messagingApi, webhook } from "@line/bot-sdk";
 import { getActiveFaqs, type Faq } from "@/lib/supabase/server";
 
@@ -43,9 +44,18 @@ export async function POST(request: Request): Promise<Response> {
     return new Response("Unauthorized", { status: 401 });
   }
 
-  // LINE の仕様上、できるだけ早く 200 を返すため処理を非同期で実行
-  handleEvents(rawBody, env.channelAccessToken).catch((error) => {
-    console.error("[Webhook] イベント処理中にエラーが発生しました:", error);
+  // after() でレスポンス送信後も非同期処理を継続させる。
+  // Vercel Serverless Functions はレスポンスを返した直後に実行コンテキストを終了する。
+  // 以前の fire-and-forget（.catch() だけつけて未 await）では、200 を返した時点で
+  // Supabase への接続も LINE Reply API 呼び出しも全てキャンセルされていた。
+  // after() は Vercel の waitUntil として機能し、登録した Promise が
+  // 解決するまで関数を生かし続ける。
+  after(async () => {
+    try {
+      await handleEvents(rawBody, env.channelAccessToken);
+    } catch (error) {
+      console.error("[Webhook] イベント処理中にエラーが発生しました:", error);
+    }
   });
 
   return new Response("OK", { status: 200 });
@@ -71,12 +81,15 @@ async function handleEvents(
     return;
   }
 
+  console.log(`[Webhook] イベント処理開始 (${body.events.length} 件)`);
+
   // FAQ は同一リクエスト内で1回だけ取得し、全イベントで共有する
   const faqResult = await getActiveFaqs();
   if (faqResult.error) {
     console.error("[Webhook] FAQ 取得エラー:", faqResult.error);
   }
   const faqs = faqResult.data ?? [];
+  console.log(`[Webhook] FAQ 取得完了 (${faqs.length} 件)`);
 
   const client = new MessagingApiClient({ channelAccessToken });
 
@@ -108,11 +121,16 @@ async function handleEvent(
   const matched = faqs.find((faq) => faq.question === textMessage.text);
   const replyText = matched ? matched.answer : FALLBACK_MESSAGE;
 
+  console.log(
+    `[Webhook] メッセージ受信 → FAQ ${matched ? "マッチ" : "フォールバック"}`
+  );
+
   try {
     await client.replyMessage({
       replyToken,
       messages: [{ type: "text", text: replyText }],
     });
+    console.log("[Webhook] LINE 返信成功");
   } catch (error) {
     console.error(
       `[Webhook] 返信に失敗しました (replyToken の末尾4文字: ...${replyToken.slice(-4)}):`,
