@@ -1,4 +1,5 @@
 import { validateSignature, messagingApi, webhook } from "@line/bot-sdk";
+import { getActiveFaqs, type Faq } from "@/lib/supabase/server";
 
 // Next.js のビルド時静的最適化を無効化し、常にリクエスト時に動的処理する
 // これがないと cacheComponents 有効環境で POST が 405 になる
@@ -50,6 +51,8 @@ export async function POST(request: Request): Promise<Response> {
   return new Response("OK", { status: 200 });
 }
 
+const FALLBACK_MESSAGE = "確認して担当者からご連絡します。";
+
 async function handleEvents(
   rawBody: string,
   channelAccessToken: string
@@ -68,14 +71,24 @@ async function handleEvents(
     return;
   }
 
+  // FAQ は同一リクエスト内で1回だけ取得し、全イベントで共有する
+  const faqResult = await getActiveFaqs();
+  if (faqResult.error) {
+    console.error("[Webhook] FAQ 取得エラー:", faqResult.error);
+  }
+  const faqs = faqResult.data ?? [];
+
   const client = new MessagingApiClient({ channelAccessToken });
 
-  await Promise.all(body.events.map((event) => handleEvent(event, client)));
+  await Promise.all(
+    body.events.map((event) => handleEvent(event, client, faqs))
+  );
 }
 
 async function handleEvent(
   event: webhook.Event,
-  client: messagingApi.MessagingApiClient
+  client: messagingApi.MessagingApiClient,
+  faqs: Faq[]
 ): Promise<void> {
   // テキストメッセージイベント以外は無視する
   if (event.type !== "message") return;
@@ -91,15 +104,14 @@ async function handleEvent(
     return;
   }
 
+  // 受信テキストと FAQ の question を完全一致で検索する
+  const matched = faqs.find((faq) => faq.question === textMessage.text);
+  const replyText = matched ? matched.answer : FALLBACK_MESSAGE;
+
   try {
     await client.replyMessage({
       replyToken,
-      messages: [
-        {
-          type: "text",
-          text: textMessage.text,
-        },
-      ],
+      messages: [{ type: "text", text: replyText }],
     });
   } catch (error) {
     console.error(

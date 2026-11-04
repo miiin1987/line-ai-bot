@@ -3,13 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev --webpack",
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
     "@line/bot-sdk": "^11.4.0",
+    "@supabase/supabase-js": "^2.118.0",
     "next": "16.4.5",
     "react": "19.3.0",
     "react-dom": "19.3.0"
