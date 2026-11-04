@@ -17,6 +17,12 @@ export type FaqItem = {
   answer: string;
 };
 
+// answered: true  → FAQを根拠にした回答が得られた
+// answered: false → FAQに根拠がなかった・APIエラー・タイムアウト（定型文を返す）
+export type AiAnswerResult =
+  | { answered: true; text: string }
+  | { answered: false; text: typeof FALLBACK_MESSAGE };
+
 type AiResponse = {
   can_answer: boolean;
   answer: string;
@@ -31,11 +37,11 @@ function isAiResponse(val: unknown): val is AiResponse {
 export async function getAiAnswer(
   question: string,
   faqs: FaqItem[]
-): Promise<string> {
+): Promise<AiAnswerResult> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     console.warn("[Claude] ANTHROPIC_API_KEY 未設定 → フォールバック");
-    return FALLBACK_MESSAGE;
+    return { answered: false, text: FALLBACK_MESSAGE };
   }
 
   const model = process.env.ANTHROPIC_MODEL ?? DEFAULT_MODEL;
@@ -109,13 +115,13 @@ ${faqXml}
       console.error(
         `[Claude] 予期しない stop_reason: ${message.stop_reason} → フォールバック`
       );
-      return FALLBACK_MESSAGE;
+      return { answered: false, text: FALLBACK_MESSAGE };
     }
 
     const toolUse = message.content.find((b) => b.type === "tool_use");
     if (!toolUse || toolUse.type !== "tool_use") {
       console.error("[Claude] tool_use ブロックなし → フォールバック");
-      return FALLBACK_MESSAGE;
+      return { answered: false, text: FALLBACK_MESSAGE };
     }
 
     // toolUse.input は SDK が JSON をパース済みのオブジェクト
@@ -123,20 +129,20 @@ ${faqXml}
 
     if (!isAiResponse(parsed)) {
       console.error("[Claude] ツール入力の構造不正 → フォールバック");
-      return FALLBACK_MESSAGE;
+      return { answered: false, text: FALLBACK_MESSAGE };
     }
 
     if (!parsed.can_answer || !parsed.answer.trim()) {
       console.log("[Claude] FAQに根拠なし → フォールバック");
-      return FALLBACK_MESSAGE;
+      return { answered: false, text: FALLBACK_MESSAGE };
     }
 
     const answer = parsed.answer.slice(0, MAX_ANSWER_CHARS);
     console.log(`[Claude] AI回答完了 (${answer.length}文字, model: ${model})`);
-    return answer;
+    return { answered: true, text: answer };
   } catch (error) {
     const msg = error instanceof Error ? error.message : "不明なエラー";
     console.error(`[Claude] エラー: ${msg}`);
-    return FALLBACK_MESSAGE;
+    return { answered: false, text: FALLBACK_MESSAGE };
   }
 }

@@ -105,3 +105,32 @@ alter table conversations enable row level security;
 --   on conversations for select
 --   to authenticated
 --   using (true);
+
+
+-- -----------------------------------------------------------------------------
+-- 4. unanswered_questions（未回答質問）
+--    FAQ完全一致にも AI でも回答できなかった質問を記録するテーブル。
+--    将来のオーナー確認・FAQ改善に使用する。
+--
+--    【個人情報の取り扱い】
+--    line_user_id・question はユーザー個人に紐付く可能性がある。
+--    service_role キーを持つサーバーサイドのみからアクセスし、
+--    RLS ポリシーを追加するまで anon / authenticated からの直接アクセスは不可。
+--    不要データは定期的に削除すること（目安: 30日）。
+-- -----------------------------------------------------------------------------
+create table if not exists unanswered_questions (
+  id              uuid        primary key default gen_random_uuid(),
+  line_event_id   text        not null unique,    -- LINE webhook イベント ID（再送重複防止）
+  line_user_id    text,                           -- LINE ユーザー ID（null の場合あり）
+  question        text        not null,           -- ユーザーの質問内容
+  status          text        not null default '未対応'
+                              check (status in ('未対応', '対応済み', '対応不要')),
+  received_at     timestamptz not null,           -- LINE イベントのタイムスタンプ
+  created_at      timestamptz not null default now()
+);
+
+-- 未対応の質問を受信日時降順で一覧取得するためのインデックス
+create index if not exists unanswered_questions_status_received_idx
+  on unanswered_questions (status, received_at desc);
+
+alter table unanswered_questions enable row level security;

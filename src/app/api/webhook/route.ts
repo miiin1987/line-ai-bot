@@ -1,6 +1,10 @@
 import { after } from "next/server";
 import { validateSignature, messagingApi, webhook } from "@line/bot-sdk";
-import { getActiveFaqs, type Faq } from "@/lib/supabase/server";
+import {
+  getActiveFaqs,
+  saveUnansweredQuestion,
+  type Faq,
+} from "@/lib/supabase/server";
 import { getAiAnswer } from "@/lib/claude/client";
 
 // Next.js のビルド時静的最適化を無効化し、常にリクエスト時に動的処理する
@@ -121,14 +125,23 @@ async function handleEvent(
   const matched = faqs.find((faq) => faq.question === textMessage.text);
 
   let replyText: string;
+  let saveToDb = false;
+
   if (matched) {
     console.log("[Webhook] メッセージ受信 → FAQ完全一致");
     replyText = matched.answer;
   } else {
     console.log("[Webhook] メッセージ受信 → Claude AI 呼び出し");
-    replyText = await getAiAnswer(textMessage.text, faqs);
+    const aiResult = await getAiAnswer(textMessage.text, faqs);
+    replyText = aiResult.text;
+    // AI が回答できなかった場合のみ DB に保存する
+    saveToDb = !aiResult.answered;
+    if (saveToDb) {
+      console.log("[Webhook] AI 回答不可 → 未回答質問を記録");
+    }
   }
 
+  // LINE への返信（保存処理に先行させる）
   try {
     await client.replyMessage({
       replyToken,
@@ -140,5 +153,22 @@ async function handleEvent(
       `[Webhook] 返信に失敗しました (replyToken の末尾4文字: ...${replyToken.slice(-4)}):`,
       error
     );
+  }
+
+  // 回答不可の場合のみ Supabase に保存する。
+  // 返信の成否に関わらず試み、保存失敗はログで記録するがユーザー体験には影響させない。
+  if (saveToDb) {
+    // source・userId は共に optional（グループ送信・source 欠落の場合は null）
+    const lineUserId = messageEvent.source?.userId ?? null;
+    const result = await saveUnansweredQuestion({
+      lineEventId: event.webhookEventId,
+      lineUserId,
+      question: textMessage.text,
+      receivedAt: new Date(event.timestamp),
+    });
+    if (result.saved) {
+      console.log("[Webhook] 未回答質問の保存完了");
+    }
+    // エラーログは saveUnansweredQuestion 内で記録済み
   }
 }

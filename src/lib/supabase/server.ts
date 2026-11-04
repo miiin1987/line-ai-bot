@@ -83,3 +83,56 @@ export async function getActiveFaqs(): Promise<FaqResult> {
     return { data: null, error: message };
   }
 }
+
+// -----------------------------------------------------------------------
+// 未回答質問の保存
+// -----------------------------------------------------------------------
+
+export type SaveUnansweredQuestionParams = {
+  lineEventId: string;
+  lineUserId: string | null;
+  question: string;
+  receivedAt: Date;
+};
+
+export type SaveUnansweredQuestionResult =
+  | { saved: true }
+  | { saved: false; error: string };
+
+/**
+ * FAQ完全一致・AI回答のいずれにも該当しなかった質問を保存する。
+ * line_event_id を一意キーとして upsert するため、
+ * LINE からの再送（redelivery）があっても二重登録しない。
+ */
+export async function saveUnansweredQuestion(
+  params: SaveUnansweredQuestionParams
+): Promise<SaveUnansweredQuestionResult> {
+  try {
+    const supabase = createServerClient();
+
+    const { error } = await supabase
+      .from("unanswered_questions")
+      .upsert(
+        {
+          line_event_id: params.lineEventId,
+          line_user_id: params.lineUserId,
+          question: params.question,
+          received_at: params.receivedAt.toISOString(),
+        },
+        // line_event_id が既に存在する（再送）場合は何もしない
+        { onConflict: "line_event_id", ignoreDuplicates: true }
+      );
+
+    if (error) {
+      console.error("[Supabase] unanswered_questions 保存エラー:", error.message);
+      return { saved: false, error: error.message };
+    }
+
+    return { saved: true };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "不明なエラーが発生しました";
+    console.error("[Supabase] 予期しないエラー:", message);
+    return { saved: false, error: message };
+  }
+}
