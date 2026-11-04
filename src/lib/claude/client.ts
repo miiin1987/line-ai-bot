@@ -6,6 +6,12 @@ const MAX_ANSWER_CHARS = 200;
 const TIMEOUT_MS = 8_000;
 const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 
+// tool_choice: { type: "tool" } で必ずこのツールを呼ばせることで、
+// SDK がレスポンスを JSON オブジェクトとして返す。
+// テキストレスポンスを JSON.parse する旧方式では Claude が
+// マークダウンコードフェンスや説明文を付加して失敗するケースがあった。
+const ANSWER_TOOL_NAME = "provide_faq_answer";
+
 export type FaqItem = {
   question: string;
   answer: string;
@@ -22,10 +28,6 @@ function isAiResponse(val: unknown): val is AiResponse {
   return typeof obj.can_answer === "boolean" && typeof obj.answer === "string";
 }
 
-/**
- * FAQリストを根拠にして質問へのAI回答を生成する。
- * FAQに根拠がない場合、またはAPIエラーやタイムアウト時はFALLBACK_MESSAGEを返す。
- */
 export async function getAiAnswer(
   question: string,
   faqs: FaqItem[]
@@ -61,12 +63,6 @@ export async function getAiAnswer(
 - FAQに根拠がある場合のみ回答し、200文字以内に収める
 - FAQに根拠がない場合は can_answer を false にする
 
-【応答形式】
-前後にテキストを含めず、必ず以下のJSON形式のみを返す:
-{"can_answer":true,"answer":"回答（200文字以内）"}
-または
-{"can_answer":false,"answer":""}
-
 <faq_data>
 ${faqXml}
 </faq_data>`;
@@ -77,27 +73,56 @@ ${faqXml}
         model,
         max_tokens: 400,
         system: systemPrompt,
+        tools: [
+          {
+            name: ANSWER_TOOL_NAME,
+            description:
+              "FAQを根拠にした回答を提供する。FAQに根拠がない場合は can_answer を false にする。",
+            input_schema: {
+              type: "object",
+              properties: {
+                can_answer: {
+                  type: "boolean",
+                  description:
+                    "FAQに根拠がある場合は true、ない場合は false",
+                },
+                answer: {
+                  type: "string",
+                  description:
+                    "回答文字列（200文字以内）。can_answer が false の場合は空文字列",
+                },
+              },
+              required: ["can_answer", "answer"],
+            },
+          },
+        ],
+        // type: "tool" を指定することでモデルが必ずこのツールを呼ぶ。
+        // レスポンスは SDK が JSON オブジェクトとしてパース済みで返すため
+        // JSON.parse は不要。
+        tool_choice: { type: "tool", name: ANSWER_TOOL_NAME },
         messages: [{ role: "user", content: `質問: ${question}` }],
       },
       { timeout: TIMEOUT_MS }
     );
 
-    const textBlock = message.content.find((b) => b.type === "text");
-    if (!textBlock || textBlock.type !== "text") {
-      console.error("[Claude] テキストブロックなし → フォールバック");
+    if (message.stop_reason !== "tool_use") {
+      console.error(
+        `[Claude] 予期しない stop_reason: ${message.stop_reason} → フォールバック`
+      );
       return FALLBACK_MESSAGE;
     }
 
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(textBlock.text);
-    } catch {
-      console.error("[Claude] JSON パース失敗 → フォールバック");
+    const toolUse = message.content.find((b) => b.type === "tool_use");
+    if (!toolUse || toolUse.type !== "tool_use") {
+      console.error("[Claude] tool_use ブロックなし → フォールバック");
       return FALLBACK_MESSAGE;
     }
+
+    // toolUse.input は SDK が JSON をパース済みのオブジェクト
+    const parsed: unknown = toolUse.input;
 
     if (!isAiResponse(parsed)) {
-      console.error("[Claude] レスポンス構造不正 → フォールバック");
+      console.error("[Claude] ツール入力の構造不正 → フォールバック");
       return FALLBACK_MESSAGE;
     }
 
@@ -110,8 +135,8 @@ ${faqXml}
     console.log(`[Claude] AI回答完了 (${answer.length}文字, model: ${model})`);
     return answer;
   } catch (error) {
-    const message = error instanceof Error ? error.message : "不明なエラー";
-    console.error(`[Claude] エラー: ${message}`);
+    const msg = error instanceof Error ? error.message : "不明なエラー";
+    console.error(`[Claude] エラー: ${msg}`);
     return FALLBACK_MESSAGE;
   }
 }
