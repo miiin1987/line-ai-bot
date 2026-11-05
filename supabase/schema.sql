@@ -134,3 +134,17 @@ create index if not exists unanswered_questions_status_received_idx
   on unanswered_questions (status, received_at desc);
 
 alter table unanswered_questions enable row level security;
+
+-- -----------------------------------------------------------------------------
+-- 5. owner_settings（オーナー設定）
+--    LINE 経由のオーナー登録フローで取得したユーザー ID を保存するテーブル。
+--    id = 1 の単一行のみ許可。upsert で上書き登録できる。
+-- -----------------------------------------------------------------------------
+create table if not exists owner_settings (
+  id              integer     primary key default 1,
+  line_user_id    text        not null,
+  registered_at   timestamptz not null default now(),
+  constraint owner_settings_single_row check (id = 1)
+);
+
+alter table owner_settings enable row level security;

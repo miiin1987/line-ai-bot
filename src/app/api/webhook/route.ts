@@ -1,11 +1,14 @@
 import { after } from "next/server";
+import { timingSafeEqual } from "crypto";
 import { validateSignature, messagingApi, webhook } from "@line/bot-sdk";
 import {
   getActiveFaqs,
   saveUnansweredQuestion,
+  registerOwner,
   type Faq,
 } from "@/lib/supabase/server";
 import { getAiAnswer } from "@/lib/claude/client";
+import { notifyOwner } from "@/lib/line/notify";
 
 // Next.js のビルド時静的最適化を無効化し、常にリクエスト時に動的処理する
 // これがないと cacheComponents 有効環境で POST が 405 になる
@@ -120,6 +123,13 @@ async function handleEvent(
     return;
   }
 
+  // オーナー登録コマンド（"オーナー登録 <secret>"）を最初に処理する。
+  // 認証が通った場合は登録して返信し、以降の FAQ/AI 応答をスキップする。
+  if (textMessage.text.startsWith("オーナー登録 ")) {
+    await handleOwnerRegistration(textMessage.text, messageEvent, client);
+    return;
+  }
+
   // FAQ と完全一致する場合は登録済み回答を返す。
   // 一致しない場合のみ Claude API を呼び出してFAQを根拠に回答させる。
   const matched = faqs.find((faq) => faq.question === textMessage.text);
@@ -155,20 +165,102 @@ async function handleEvent(
     );
   }
 
-  // 回答不可の場合のみ Supabase に保存する。
-  // 返信の成否に関わらず試み、保存失敗はログで記録するがユーザー体験には影響させない。
+  // 回答不可の場合のみ Supabase に保存し、新規保存時にオーナーへ通知する。
+  // 返信の成否に関わらず試み、保存・通知の失敗はログで記録するがユーザー体験には影響させない。
   if (saveToDb) {
     // source・userId は共に optional（グループ送信・source 欠落の場合は null）
     const lineUserId = messageEvent.source?.userId ?? null;
+    const receivedAt = new Date(event.timestamp);
+
     const result = await saveUnansweredQuestion({
       lineEventId: event.webhookEventId,
       lineUserId,
       question: textMessage.text,
-      receivedAt: new Date(event.timestamp),
+      receivedAt,
     });
+
     if (result.saved) {
-      console.log("[Webhook] 未回答質問の保存完了");
+      if (result.isNew) {
+        // 新規保存成功 → オーナーへ通知
+        console.log("[Webhook] 未回答質問の保存完了 → オーナーへ通知");
+        await notifyOwner(textMessage.text, receivedAt);
+      } else {
+        // webhook 再送による重複 → 通知はスキップ（二重通知防止）
+        console.log("[Webhook] 再送イベント → 通知スキップ");
+      }
     }
-    // エラーログは saveUnansweredQuestion 内で記録済み
+    // 保存失敗のログは saveUnansweredQuestion 内で記録済み
+  }
+}
+
+// ---------------------------------------------------------------------------
+// オーナー登録
+// ---------------------------------------------------------------------------
+
+/**
+ * タイミング攻撃を緩和するシークレット比較。
+ * 長さが異なる場合はダミー比較でタイミングを均一化してから false を返す。
+ */
+function isValidSecret(input: string, expected: string): boolean {
+  const inputBuf = Buffer.from(input);
+  const expectedBuf = Buffer.from(expected);
+  if (inputBuf.length !== expectedBuf.length) {
+    timingSafeEqual(expectedBuf, expectedBuf); // ダミー比較
+    return false;
+  }
+  return timingSafeEqual(inputBuf, expectedBuf);
+}
+
+/**
+ * "オーナー登録 <secret>" コマンドを処理する。
+ * - OWNER_REGISTRATION_SECRET と一致した場合のみ登録する
+ * - 認証失敗時はサイレントスキップ（コマンドの存在・形式を外部に漏らさない）
+ * - lineUserId はログに出力しない
+ */
+async function handleOwnerRegistration(
+  text: string,
+  messageEvent: webhook.MessageEvent,
+  client: messagingApi.MessagingApiClient
+): Promise<void> {
+  const replyToken = messageEvent.replyToken;
+  if (!replyToken) return;
+
+  const registrationSecret = process.env.OWNER_REGISTRATION_SECRET;
+  if (!registrationSecret) {
+    console.warn("[Owner] OWNER_REGISTRATION_SECRET 未設定 → 登録スキップ");
+    return;
+  }
+
+  // "オーナー登録 " の後ろをシークレットとして抽出
+  const inputSecret = text.slice("オーナー登録 ".length);
+
+  if (!isValidSecret(inputSecret, registrationSecret)) {
+    // サイレントスキップ（ログにシークレットは出力しない）
+    console.warn("[Owner] 登録試行: 認証失敗");
+    return;
+  }
+
+  const lineUserId = messageEvent.source?.userId;
+  if (!lineUserId) {
+    console.error("[Owner] userId が取得できません");
+    return;
+  }
+
+  const result = await registerOwner(lineUserId);
+  if (!result.success) {
+    console.error("[Owner] DB 保存失敗:", result.error);
+    return;
+  }
+
+  console.log("[Owner] オーナー登録完了");
+
+  try {
+    await client.replyMessage({
+      replyToken,
+      messages: [{ type: "text", text: "オーナー登録が完了しました。" }],
+    });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : "不明なエラー";
+    console.error("[Owner] 返信失敗:", msg);
   }
 }

@@ -96,7 +96,7 @@ export type SaveUnansweredQuestionParams = {
 };
 
 export type SaveUnansweredQuestionResult =
-  | { saved: true }
+  | { saved: true; isNew: boolean }
   | { saved: false; error: string };
 
 /**
@@ -110,7 +110,9 @@ export async function saveUnansweredQuestion(
   try {
     const supabase = createServerClient();
 
-    const { error } = await supabase
+    // .select("id") を付けることで INSERT ... ON CONFLICT DO NOTHING RETURNING id
+    // を発行できる。実際に挿入された行のみ返るため data の長さで新規/重複を判別する。
+    const { data, error } = await supabase
       .from("unanswered_questions")
       .upsert(
         {
@@ -121,18 +123,84 @@ export async function saveUnansweredQuestion(
         },
         // line_event_id が既に存在する（再送）場合は何もしない
         { onConflict: "line_event_id", ignoreDuplicates: true }
-      );
+      )
+      .select("id");
 
     if (error) {
       console.error("[Supabase] unanswered_questions 保存エラー:", error.message);
       return { saved: false, error: error.message };
     }
 
-    return { saved: true };
+    // data が空配列 → webhook 再送による重複（isNew: false）
+    // data に行あり → 新規挿入（isNew: true）
+    const isNew = Array.isArray(data) && data.length > 0;
+    return { saved: true, isNew };
   } catch (err) {
     const message =
       err instanceof Error ? err.message : "不明なエラーが発生しました";
     console.error("[Supabase] 予期しないエラー:", message);
     return { saved: false, error: message };
+  }
+}
+
+// -----------------------------------------------------------------------
+// オーナー設定（owner_settings）
+// -----------------------------------------------------------------------
+
+export type RegisterOwnerResult =
+  | { success: true }
+  | { success: false; error: string };
+
+/**
+ * オーナーの LINE ユーザー ID を owner_settings に保存する。
+ * id = 1 の単一行を upsert するため、既存登録は上書きされる。
+ * lineUserId はログに出力しない。
+ */
+export async function registerOwner(
+  lineUserId: string
+): Promise<RegisterOwnerResult> {
+  try {
+    const supabase = createServerClient();
+
+    const { error } = await supabase
+      .from("owner_settings")
+      .upsert(
+        { id: 1, line_user_id: lineUserId },
+        { onConflict: "id" }
+      );
+
+    if (error) {
+      console.error("[Supabase] owner_settings 保存エラー:", error.message);
+      return { success: false, error: error.message };
+    }
+
+    return { success: true };
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "不明なエラーが発生しました";
+    console.error("[Supabase] 予期しないエラー:", message);
+    return { success: false, error: message };
+  }
+}
+
+/**
+ * owner_settings からオーナーの LINE ユーザー ID を取得する。
+ * 未登録・エラー時は null を返す。取得した ID はログに出力しない。
+ */
+export async function getOwnerUserId(): Promise<string | null> {
+  try {
+    const supabase = createServerClient();
+
+    const { data, error } = await supabase
+      .from("owner_settings")
+      .select("line_user_id")
+      .eq("id", 1)
+      .single();
+
+    if (error || !data) return null;
+
+    return (data as { line_user_id: string }).line_user_id;
+  } catch {
+    return null;
   }
 }
